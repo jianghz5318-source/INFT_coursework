@@ -67,7 +67,7 @@ from datetime import datetime
 
 # a bunch of system constants (globals)
 bse_sys_minprice = 1                    # minimum price in the system, in cents/pennies
-bse_sys_maxprice = 20000                  # maximum price in the system, in cents/pennies
+bse_sys_maxprice = 20000                # maximum price in the system, in cents/pennies
 # ticksize should be a param of an exchange (so different exchanges have different ticksizes)
 ticksize = 1  # minimum change in price, in cents/pennies
 verbose = False # set global value verbose (for output) #JC: 22/06/2025
@@ -2388,71 +2388,96 @@ class TraderMMM02(Trader):
             self.lastquote = order
         return order
 
-        def respond(self, time, lob, trade, vrbs):
-    
-            vrbs = False
+    def respond(self, time, lob, trade, vrbs):
+        """
+        Improved MMM02 logic:
+        - Uses a moving average of recent trades (n_past_trades).
+        - Buys only if the best ask is cheap AND the last trade price
+          is not below the recent average (simple trend filter).
+        - Sells either at a profit target (ask_delta) or via a stop-loss
+          if price moves too far against the position.
+        """
 
-            tape = lob['tape']
-            tape_position = -1
-            n_prices = 0
-            sum_prices = 0
+        tape = lob['tape']
+        tape_pos = -1
+        n_prices = 0
+        sum_prices = 0
 
-            while n_prices < self.n_past_trades and abs(tape_position) <= len(tape):
-                if tape[tape_position]['type'] == 'Trade':
-                    sum_prices += tape[tape_position]['price']
-                    n_prices += 1
-                tape_position -= 1
+        while n_prices < self.n_past_trades and abs(tape_pos) <= len(tape):
+            if len(tape) == 0:
+                break
+            event = tape[tape_pos]
+            if event['type'] == 'Trade':
+                sum_prices += event['price']
+                n_prices += 1
+            tape_pos -= 1
 
-            avg_price_ok = (n_prices == self.n_past_trades)
-            if avg_price_ok:
-                avg_price = int(round(sum_prices / n_prices))
-            else:
-                avg_price = None
+        avg_price_ok = (n_prices == self.n_past_trades)
+        if avg_price_ok:
+            avg_price = int(round(sum_prices / n_prices))
+        else:
+            avg_price = None
 
-            last_trade_price = None
-            for t in reversed(tape):
-                if t['type'] == 'Trade':
-                    last_trade_price = t['price']
-                    break
+        last_trade_price = None
+        for ev in reversed(tape):
+            if ev['type'] == 'Trade':
+                last_trade_price = ev['price']
+                break
 
-            trend_ok = (avg_price_ok and
-                        last_trade_price is not None and
-                        last_trade_price >= avg_price)
+        trend_ok = (
+            avg_price_ok
+            and (last_trade_price is not None)
+            and (last_trade_price >= avg_price)
+        )
 
-            if self.job == 'Buy' and avg_price_ok:
+        if self.job == 'Buy' and avg_price_ok:
 
-                if lob['asks']['n'] > 0:
-                    best_ask = lob['asks']['best']
+            if lob['asks']['n'] > 0:
+                best_ask = lob['asks']['best']
 
-                if (best_ask / avg_price < self.bid_percent) and trend_ok:
+                cheap_enough = (best_ask / avg_price) < self.bid_percent
 
-                    bidprice = best_ask + 1
+                if cheap_enough and trend_ok:
+                    bidprice = best_ask + 1  # 稍微抬高一点，增加成交概率
                     if bidprice < self.balance:
                         order = Order(self.tid, 'Bid', bidprice, 1, time, lob['QID'])
                         self.orders = [order]
+                    else:
+                        pass
+                else:
+                    pass
+            else:
+                pass
 
-            elif self.job == 'Sell':
+        elif self.job == 'Sell':
 
-                if lob['bids']['n'] > 0 and self.last_purchase_price is not None:
+            if lob['bids']['n'] > 0 and self.last_purchase_price is not None:
 
-                    best_bid = lob['bids']['best']
+                best_bid = lob['bids']['best']
 
-                    target_price = self.last_purchase_price + self.ask_delta
+                target_price = self.last_purchase_price + self.ask_delta
+
                 stop_loss_level = self.last_purchase_price - 2 * self.ask_delta
 
-                if target_price < best_bid:
-                    # take profit
-                    order = Order(self.tid, 'Ask', target_price, 1, time, lob['QID'])
+                if best_bid > target_price:
+                    askprice = target_price
+                    order = Order(self.tid, 'Ask', askprice, 1, time, lob['QID'])
                     self.orders = [order]
 
                 elif best_bid <= stop_loss_level:
-                    # stop loss
-                    order = Order(self.tid, 'Ask', best_bid, 1, time, lob['QID'])
+                    askprice = best_bid
+                    order = Order(self.tid, 'Ask', askprice, 1, time, lob['QID'])
                     self.orders = [order]
+                else:
+                    pass
+            else:
+                pass
 
-        self.profitpertime = self.profitpertime_update(time,
-                                                       self.birthtime,
-                                                       self.balance)
+        self.profitpertime = self.profitpertime_update(
+            time,
+            self.birthtime,
+            self.balance
+        )
 
 
     def bookkeep(self, time, trade, order, vrbs):
